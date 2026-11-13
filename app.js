@@ -57,12 +57,23 @@
     return players.size % COLORS.length;
   }
 
+  const active = new Set(); // every finger currently down, players or not
+  const DEBUG = /[?&]debug/.test(location.search);
+  const log = [];
+  function dbg(msg) {
+    if (!DEBUG) return;
+    log.push(`${(performance.now() / 1000).toFixed(2)} ${msg}`);
+    if (log.length > 14) log.shift();
+  }
+
   function buzz(p) { try { navigator.vibrate && navigator.vibrate(p); } catch (_) {} }
 
   // ---------- input ----------
   function onDown(e) {
     e.preventDefault();
     const t = performance.now();
+    active.add(e.pointerId);
+    dbg(`down #${e.pointerId} ${e.pointerType} [${state}] active=${active.size}`);
     wake();
     if (state === 'winner') {
       if (t - stateAt < 900) { ignored.add(e.pointerId); return; }
@@ -86,7 +97,11 @@
 
   function onUp(e) {
     const t = performance.now();
-    maybeFullscreen();
+    active.delete(e.pointerId);
+    dbg(`${e.type === 'pointercancel' ? 'CANCEL' : 'up'} #${e.pointerId} [${state}] active=${active.size}`);
+    // Going fullscreen resizes the page, and Android Chrome cancels every touch that is down when that happens.
+    // So only try it when this was the last finger on the screen.
+    if (e.type === 'pointerup' && active.size === 0 && (state === 'lobby' || state === 'winner')) maybeFullscreen();
     if (ignored.delete(e.pointerId)) return;
     const p = players.get(e.pointerId);
     if (!p || p.lifted) return;
@@ -126,7 +141,11 @@
       }
     } catch (_) { lock = null; }
   }
+  document.addEventListener('fullscreenchange', () => dbg(`fullscreen ${!!document.fullscreenElement}`));
+  window.addEventListener('resize', () => dbg(`resize ${innerWidth}x${innerHeight}`));
   document.addEventListener('visibilitychange', () => {
+    dbg(`visibility ${document.visibilityState}`);
+    active.clear();
     if (document.visibilityState === 'visible') wake();
     else resetLobby(performance.now());
   });
@@ -438,6 +457,17 @@
     }
   }
 
+  function drawDebug() {
+    ctx.save();
+    ctx.font = `${12 * S}px monospace`; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    const lh = 15 * S, lines = [`maxTouchPoints=${navigator.maxTouchPoints} active=${active.size} players=${players.size}`, ...log];
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(0, H - lines.length * lh - 8, W, lines.length * lh + 8);
+    ctx.fillStyle = '#7CFF9B';
+    lines.forEach((l, i) => ctx.fillText(l, 6, H - lines.length * lh - 4 + i * lh));
+    ctx.restore();
+  }
+
   let last = performance.now();
   function frame(t) {
     const dt = clamp((t - last) / 16.67, 0, 3);
@@ -449,6 +479,7 @@
     if (winner) drawPlayer(winner, t);
     drawConfetti();
     drawHud(t);
+    if (DEBUG) drawDebug();
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
@@ -458,5 +489,12 @@
 
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+    // A new version took over: reload once nobody is touching the screen, so updates show up without a second launch.
+    const hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController) return;
+      const tryReload = () => (active.size === 0 && state === 'lobby' ? location.reload() : setTimeout(tryReload, 1000));
+      tryReload();
+    });
   }
 })();
